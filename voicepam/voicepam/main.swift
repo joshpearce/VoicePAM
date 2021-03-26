@@ -11,21 +11,6 @@ import AVFoundation
 import QuartzCore
 import ArgumentParser
 
-class RecordingDelegate: NSObject, AVAudioRecorderDelegate {
-    let done, error: () -> Void
-    init(done: @escaping () -> Void, error: @escaping () -> Void) {
-        self.done = done
-        self.error = error
-    }
-    public func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
-        self.done()
-    }
-    
-    public func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
-        self.error()
-    }
-}
-
 enum State: Int {
     case None, Record, Play
 }
@@ -35,27 +20,69 @@ let sampleRate = 44100.0
 let channels = 1
 let dbFloor: Float = 30.0
 
+typealias AudioDoneClosure = (_ recorder: AVAudioRecorder, _ successfully: Bool) -> Void
+typealias AudioErrorClosure = (_ recorder: AVAudioRecorder, _ error: Error?) -> Void
+
+class RecordingDelegate: NSObject, AVAudioRecorderDelegate {
+    let done: AudioDoneClosure
+    let error: AudioErrorClosure
+    init(done: @escaping AudioDoneClosure, error: @escaping AudioErrorClosure) {
+        self.done = done
+        self.error = error
+    }
+    public func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        self.done(recorder, flag)
+    }
+    
+    public func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+        self.error(recorder, error)
+    }
+}
 
 struct MainProcess: ParsableCommand {
+    
     static var shouldExit = false
     
     @Option()
     var outFile: String = ""
+    func run () {
+        let app = App()
+        app.run(outFile)
+    }
+}
 
-    mutating func run () {
+class App {
+    let tc: TerminalController
+    var recordingDelegate: RecordingDelegate? = nil
+    
+    init() {
+        tc = TerminalController(stream: stdoutStream)!
+    }
+    
+    public func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        print("Recording complete")
+        MainProcess.shouldExit = true
+    }
+    
+    public func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+        print("Recording error")
+        MainProcess.shouldExit = true
+    }
+
+    func run (_ outFile: String) {
+        let tc = TerminalController(stream: stdoutStream)!
         var recordingURL: URL
         
         switch outFile.paramStatus {
         case .directoryProvided:
-            print ("Please provide a path+filename, not just a directory")
-            Self.shouldExit = true
+            tc.write("Please provide a path+filename, not just a directory\n", inColor: .red)
+            MainProcess.shouldExit = true
             return
         case .directoryNotFound:
-            print ("directory not found for: \(outFile)")
-            Self.shouldExit = true
+            tc.write("directory not found for: \(outFile)\n", inColor: .red)
+            MainProcess.shouldExit = true
             return
         case .ok:
-            print ("using output file: \(outFile)")
             recordingURL = URL(fileURLWithPath: outFile)
         default:
             let userHiddenDir = FileManager.default.homeDirectoryForCurrentUser
@@ -66,14 +93,13 @@ struct MainProcess: ParsableCommand {
             }
             catch let error as NSError
             {
-                print("Unable to create \(userHiddenDir.absoluteString) \(error.debugDescription)")
-                Self.shouldExit = true
+                tc.write("Unable to create \(userHiddenDir.absoluteString) \(error.debugDescription)\n", inColor: .red)
+                MainProcess.shouldExit = true
                 return
             }
         }
         
-        //print ("Output file: \(outFile)")
-        //Self.shouldExit = true
+        //tc.write("using output file: \(recordingURL.path)\n")
 
         let settings: [String: AnyObject] = [
             AVFormatIDKey : NSNumber(value: Int32(kAudioFormatMPEG4AAC)),
@@ -92,25 +118,91 @@ struct MainProcess: ParsableCommand {
         }
         catch let error as NSError
         {
-            print("Error: \(error.debugDescription)")
-            Self.shouldExit = true
+            tc.write("Error: \(error.debugDescription)\n", inColor: .red)
+            MainProcess.shouldExit = true
             return
         }
         
-        recorder.delegate = RecordingDelegate(
+        recordingDelegate = RecordingDelegate(
             done: {
-            () -> Void in
+            (_ recorder: AVAudioRecorder, _ successfully: Bool) -> Void in
                 print("Recording complete")
-                Self.shouldExit = true
+                MainProcess.shouldExit = true
             },
             error: {
-            () -> Void in
+            (_ recorder: AVAudioRecorder, _ error: Error?) -> Void in
                 print("Recording error")
-                Self.shouldExit = true
+                MainProcess.shouldExit = true
             })
-        let prepareSuccess = recorder.prepareToRecord()
+        
+        recorder.delegate = recordingDelegate!
+        
+        let _ = recorder.prepareToRecord()
 
         recorder.isMeteringEnabled = true;
+        
+        var cmd: UInt8 = 0
+        while true {
+            tc.clearLine()
+            tc.write("Press 'r' to record, 'p' to play recording, or 'q' to quit.")
+            cmd = tc.getch()
+            if cmd == 114 {
+                record(tc, recorder)
+            }
+            else if cmd == 112 {
+                play(recordingURL)
+            }
+            else if cmd == 113 {
+                MainProcess.shouldExit = true
+                break
+            }
+        }
+    }
+    
+    func record(_ tc: TerminalController, _ recorder: AVAudioRecorder) {
+        tc.clearLine()
+        tc.endLine()
+        tc.write("When you are ready, press <ENTER>, and then say, \"My voice is my password.\"")
+        let _ = tc.getch()
+        recorder.record()
+        tc.clearLine()
+        tc.write("Press <ENTER> when done.\n")
+        
+        while true {
+            let prevFileControl = fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK)
+            tc.clearLine()
+            let peakPower = recorder.averagePower(forChannel: 0)
+            recorder.updateMeters()
+            let vol = max(0, dbFloor + peakPower)
+            let volMeter = String(repeating: ".", count: Int(vol))
+            tc.write(volMeter, inColor: .red, bold: true)
+            usleep(1000)
+            var byte: UInt8 = 0
+            let len = read(STDIN_FILENO, &byte, 1)
+            if len > 0 {
+                recorder.stop()
+                let _ = fcntl(STDIN_FILENO, F_SETFL, prevFileControl)
+                break
+            }
+        }
+    }
+    
+    func play(_ recordingURL: URL) {
+        do {
+            tc.clearLine()
+            tc.write("Playing...")
+            let player: AVAudioPlayer? = try AVAudioPlayer(contentsOf: recordingURL)
+            player!.volume = 1.0
+            player!.play()
+            sleep(UInt32(player!.duration.rounded(.up)))
+        }
+        catch let error as NSError
+        {
+            tc.write("Error: \(error.debugDescription)\n", inColor: .red)
+            MainProcess.shouldExit = true
+        }
+        
+    }
         
 // TODO: Convert the following to use dispatching or some async tasks
 //        tc!.write("Begin speaking in, ")
@@ -154,11 +246,11 @@ struct MainProcess: ParsableCommand {
 //        readLine()
         
         
-    }
+    
 }
 
 autoreleasepool {
-    print("In autoreleasepool")
+
     let runLoop = RunLoop.current
     MainProcess.main()
     

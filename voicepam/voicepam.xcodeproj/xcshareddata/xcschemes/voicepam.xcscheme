@@ -52,7 +52,7 @@
       </BuildableProductRunnable>
       <CommandLineArguments>
          <CommandLineArgument
-            argument = " --out-file /Users/joshuapearce/josh/"
+            argument = " --out-file /Users/joshuapearce/temp.m4a"
             isEnabled = "YES">
          </CommandLineArgument>
       </CommandLineArguments>
