@@ -161,27 +161,28 @@ class App {
     
     func record(_ tc: TerminalController, _ recorder: AVAudioRecorder) {
         tc.clearLine()
-        tc.endLine()
         tc.write("When you are ready, press <ENTER>, and then say, \"My voice is my password.\"")
         let _ = tc.getch()
         recorder.record()
-        tc.clearLine()
-        tc.write("Press <ENTER> when done.\n")
+        let prevFileControl = fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK)
         
         while true {
-            let prevFileControl = fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK)
             tc.clearLine()
             let peakPower = recorder.averagePower(forChannel: 0)
             recorder.updateMeters()
             let vol = max(0, dbFloor + peakPower)
             let volMeter = String(repeating: ".", count: Int(vol))
-            tc.write(volMeter, inColor: .red, bold: true)
+            tc.write("Press <ENTER> when done -- " + volMeter, inColor: .red, bold: true)
+            
             usleep(1000)
+            
             var byte: UInt8 = 0
             let len = read(STDIN_FILENO, &byte, 1)
             if len > 0 {
                 recorder.stop()
                 let _ = fcntl(STDIN_FILENO, F_SETFL, prevFileControl)
+                tc.moveCursor(up: 1)
+                tc.clearLine()
                 break
             }
         }
